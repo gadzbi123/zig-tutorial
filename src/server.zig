@@ -17,12 +17,7 @@ pub fn main() !void {
         var connection = try server.accept();
         defer connection.stream.close();
 
-        std.debug.print("Accepted", .{});
-
-        try readHttpRequest(connection.stream, buffer);
-        const bytes_read = try connection.stream.readAll(buffer);
-        const request = buffer[0..bytes_read];
-        std.debug.print("read buff", .{});
+        const request = try readHttpRequest(connection.stream, &buffer);
 
         const parsed_request = parseHttpRequest(request) catch |err| {
             std.debug.print("Error parsing request: {}\n", .{err});
@@ -41,6 +36,29 @@ pub fn main() !void {
     }
 }
 
+fn readHttpRequest(stream: std.net.Stream, buffer: *[]u8) ![]u8 {
+    var total_read: usize = 0;
+    var header_end_found = false;
+
+    // Read until we find the end of headers (\r\n\r\n)
+    while (total_read < buffer.len - 1 and !header_end_found) {
+        const bytes_read = try stream.read(buffer.*[total_read .. total_read + 1]);
+        if (bytes_read == 0) break;
+
+        total_read += bytes_read;
+
+        // Check for end of headers
+        if (total_read >= 4) {
+            const end_check = buffer.*[total_read - 4 .. total_read];
+            if (std.mem.eql(u8, end_check, "\r\n\r\n")) {
+                header_end_found = true;
+            }
+        }
+    }
+
+    return buffer.*[0..total_read];
+}
+
 const HttpMethod = enum {
     GET,
     POST,
@@ -54,34 +72,11 @@ const HttpRequest = struct {
     path: []const u8,
 };
 
-fn readHttpRequest(stream: std.net.Stream, buffer: []u8) ![]u8 {
-    var total_read: usize = 0;
-    var header_end_found = false;
-
-    // Read until we find the end of headers (\r\n\r\n)
-    while (total_read < buffer.len - 1 and !header_end_found) {
-        const bytes_read = try stream.read(buffer[total_read .. total_read + 1]);
-        if (bytes_read == 0) break;
-
-        total_read += bytes_read;
-
-        // Check for end of headers
-        if (total_read >= 4) {
-            const end_check = buffer[total_read - 4 .. total_read];
-            if (std.mem.eql(u8, end_check, "\r\n\r\n")) {
-                header_end_found = true;
-            }
-        }
-    }
-
-    return buffer[0..total_read];
-}
-
 fn parseHttpRequest(request: []const u8) !HttpRequest {
-    var lines = std.mem.split(u8, request, "\r\n");
+    var lines = std.mem.splitSequence(u8, request, "\r\n");
     const first_line = lines.next() orelse return error.InvalidRequest;
 
-    var parts = std.mem.split(u8, first_line, " ");
+    var parts = std.mem.splitSequence(u8, first_line, " ");
     const method_str = parts.next() orelse return error.InvalidRequest;
     const path = parts.next() orelse return error.InvalidRequest;
 
@@ -93,6 +88,8 @@ fn parseHttpRequest(request: []const u8) !HttpRequest {
         HttpMethod.PUT
     else if (std.mem.eql(u8, method_str, "DELETE"))
         HttpMethod.DELETE
+    else if (std.mem.eql(u8, method_str, "PATCH"))
+        HttpMethod.PATCH
     else
         HttpMethod.UNKNOWN;
 
@@ -103,7 +100,7 @@ fn parseHttpRequest(request: []const u8) !HttpRequest {
 }
 
 fn sendResponse(stream: std.net.Stream, status: []const u8, body: []const u8) !void {
-    const response = std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {s}\r\nContent-Length: {d}\r\nContent-Type: text/plain\r\n\r\n{s}", .{ status, body.len, body }) catch return;
+    const response = std.fmt.allocPrint(std.heap.page_allocator, "HTTP/1.1 {s}\r\nContent-Length: {d}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{s}", .{ status, body.len, body }) catch return;
     defer std.heap.page_allocator.free(response);
 
     _ = try stream.writeAll(response);
